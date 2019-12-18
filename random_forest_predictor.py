@@ -2,12 +2,20 @@ import argparse
 import numpy as np
 import pandas as pd
 import os
+import json
+from io import StringIO
 
 from sklearn.preprocessing import MultiLabelBinarizer, LabelEncoder
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.multiclass import OneVsRestClassifier
 from sklearn.externals import joblib
 
+from sagemaker_containers.beta.framework import worker
+
+model_dir = '/opt/ml/model'
+cols_list = ['gender_categorized','age_binned','district_categorized','blood_pressure',
+                'pulse_rate_categorized','respiration_rate_categorized','BODY_TEMPERATURE',
+                'BODY_WEIGHT','HEIGHT','SPO2_categorized']
 
 def drop_unnecessary_cols(df):
 
@@ -45,12 +53,12 @@ def fill_nas(df):
 
     df.SYSTOLIC_BP.fillna(120,inplace=True)
     df.DIASTOLIC_BP.fillna(80,inplace=True)
-    df.PULSE.fillna(df.PULSE.median(),inplace=True)
-    df.RESPIRATION_RATE.fillna(df.RESPIRATION_RATE.median(),inplace=True)
-    df.BODY_TEMPERATURE.fillna(df.BODY_TEMPERATURE.median(),inplace=True)
-    df.BODY_WEIGHT.fillna(df.BODY_WEIGHT.median(),inplace=True)
-    df.HEIGHT.fillna(df.HEIGHT.median(),inplace=True)
-    df.SPO2.fillna(df.SPO2.median(),inplace=True)
+    df.PULSE.fillna(82,inplace=True)
+    df.RESPIRATION_RATE.fillna(18,inplace=True)
+    df.BODY_TEMPERATURE.fillna(98,inplace=True)
+    df.BODY_WEIGHT.fillna(45,inplace=True)
+    df.HEIGHT.fillna(151,inplace=True)
+    df.SPO2.fillna(99,inplace=True)
 
     return df
 
@@ -100,36 +108,62 @@ def categorize_gender(df):
 
     return df
 
-def categorize_district(df):
+def categorize_district(df,model_dir,type='train'):
 
-    label_enc_district = LabelEncoder()
-    df['district_categorized'] = label_enc_district.fit_transform(df.DISTRICT_NAME)
-
+    if type == 'train':
+        
+        label_enc_district = LabelEncoder()
+        df['district_categorized'] = label_enc_district.fit_transform(df.DISTRICT_NAME)
+        joblib.dump(label_enc_district, os.path.join(model_dir, "district_encoder.joblib"))
+        
+    elif type == 'test':
+        
+        label_enc_district = joblib.load(os.path.join(model_dir, "district_encoder.joblib"))
+        df['district_categorized'] = label_enc_district.transform(df.DISTRICT_NAME)
+        
     return df
 
-def encode_symptoms(df):
+def encode_symptoms(df,model_dir,type='train'):
 
     df.SYMPTOM_ID = (df.SYMPTOM_ID.str.split('~'))
-    mlb_symtoms = MultiLabelBinarizer()
-    print(df.SYMPTOM_ID.head())
-    symptoms_encoded = mlb_symtoms.fit_transform(df.SYMPTOM_ID)
+    
+    symptoms_encoded = []
+    
+    if type == 'train':
+                
+        mlb_symtoms = MultiLabelBinarizer()
+        symptoms_encoded = mlb_symtoms.fit_transform(df.SYMPTOM_ID)
+        joblib.dump(mlb_symtoms, os.path.join(model_dir, "symptoms_binarizer.joblib"))
+        
+    elif type == 'test':
+                
+        mlb_symtoms = joblib.load(os.path.join(model_dir, "symptoms_binarizer.joblib"))
+        symptoms_encoded = mlb_symtoms.transform(df.SYMPTOM_ID)
+        
     df['symptoms_encoded'] = symptoms_encoded.tolist()
+    
+    print(mlb_symtoms.classes_)
 
     return df, symptoms_encoded
 
-def encode_diseases(df):
+def encode_diseases(df,model_dir):
 
     df.DISEASE_ID = (df.DISEASE_ID.str.split('~'))
     mlb_diseases = MultiLabelBinarizer()
     diseases_encoded = mlb_diseases.fit_transform(df.DISEASE_ID)
+    
+    joblib.dump(mlb_diseases, os.path.join(model_dir, "diseases_binarizer.joblib"))
+    
     df['diseases_encoded'] = diseases_encoded.tolist()
 
     return df, diseases_encoded
 
-def format_data(df):
+def format_data(df,model_dir,type='train'):
 
-    df = drop_unnecessary_cols(df)
-    df = drop_wrong_vitals(df)
+    if type == 'train':
+        df = drop_unnecessary_cols(df)
+        df = drop_wrong_vitals(df)
+        
     df = bin_ages(df)
     df = fill_nas(df)
     df = categorize_bp(df)
@@ -137,11 +171,15 @@ def format_data(df):
     df = categorize_respiration_rate(df)
     df = categorize_spo2(df)
     df = categorize_gender(df)
-    df = categorize_district(df)
-    df, symptoms_encoded = encode_symptoms(df)
-    df, diseases_encoded = encode_diseases(df)
+    df = categorize_district(df,model_dir,type)
+    df, symptoms_encoded = encode_symptoms(df,model_dir,type)
+    
+    if type == 'train':
+        df, diseases_encoded = encode_diseases(df,model_dir)
+        return df, symptoms_encoded, diseases_encoded  
+    elif type == 'test':
+        return df, symptoms_encoded
 
-    return df, symptoms_encoded, diseases_encoded
 
 
 if __name__ == '__main__':
@@ -167,15 +205,11 @@ if __name__ == '__main__':
     raw_data = [ pd.read_csv(file,encoding = "ISO-8859-1", engine="python") for file in input_files ]
     train_data = pd.concat(raw_data)
     
-    print(train_data.columns)
+    #print(train_data.columns)
       
     # formatting
-
-    cols_list = ['gender_categorized','age_binned','district_categorized','blood_pressure',
-                'pulse_rate_categorized','respiration_rate_categorized','BODY_TEMPERATURE',
-                'BODY_WEIGHT','HEIGHT','SPO2_categorized']
-
-    train_data, train_symptoms, train_diseases = format_data(train_data)
+    
+    train_data, train_symptoms, train_diseases = format_data(train_data,args.model_dir)
     X_train = train_data[cols_list].values
     X_train = np.hstack((X_train, train_symptoms))
     Y_train = train_diseases
@@ -191,6 +225,72 @@ if __name__ == '__main__':
     # Print the coefficients of the trained classifier, and save the coefficients
     joblib.dump(clf, os.path.join(args.model_dir, "model.joblib"))
 
+    
+def input_fn(input_data, content_type):
+
+#      print(content_type)
+#     print(input_data)
+    
+    if content_type == 'text/csv':
+        
+        #model_dir = os.environ['SM_MODEL_DIR']
+        df = pd.read_csv(StringIO(input_data))
+        df, symptoms_enc = format_data(df,model_dir,'test')
+        X_test = df[cols_list].values
+        X_test = np.hstack((X_test, symptoms_enc)) 
+        
+#         for i,X in enumerate(X_test):
+#             print(df.loc[i])
+#             print(X)
+
+        return X_test
+        
+    else:
+        raise ValueError("{} not supported by script!".format(content_type))
+    
+    
+def output_fn(prediction, accept):
+    
+#     print(type(prediction))
+#     print(prediction.shape)
+#     print(prediction)
+    
+    mlb_diseases = joblib.load(os.path.join(model_dir, "diseases_binarizer.joblib"))
+    diseases_list = list(mlb_diseases.classes_)
+    output_list = []
+    
+    for encoded_disease in prediction:
+        
+        #print(encoded_disease)
+        diseases = []
+        for i, disease in enumerate(diseases_list):
+            if encoded_disease[i] == 1:
+                diseases.append(disease)
+        
+        output_list.append(diseases)
+        
+    print(output_list)
+    
+    if accept == "application/json":
+        
+        if len(output_list) == 1:         
+            json_output = {"diseases": output_list[0]}
+            
+        else:    
+            
+            instances = []
+            for row in output_list:
+                instances.append({"diseases": row})
+
+            json_output = {"instances": instances}
+
+        return worker.Response(json.dumps(json_output), mimetype=accept)
+
+    else:
+        raise RuntimeException("{} accept type is not supported by this script.".format(accept))
+    
+    
+    return output_list
 
 def model_fn(model_dir):
     """Deserialized and return fitted model
