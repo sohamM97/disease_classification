@@ -214,7 +214,7 @@ if __name__ == '__main__':
     X_train = np.hstack((X_train, train_symptoms))
     Y_train = train_diseases
 
-    # Here we support a single hyperparameter, 'max_leaf_nodes'. Note that you can add as many
+    # Here we support a single hyperparameter, 'max_depth'. Note that you can add as many
     # as your training my require in the ArgumentParser above.
     max_depth = args.max_depth
 
@@ -227,22 +227,14 @@ if __name__ == '__main__':
 
     
 def input_fn(input_data, content_type):
-
-#      print(content_type)
-#     print(input_data)
     
     if content_type == 'text/csv':
         
-        #model_dir = os.environ['SM_MODEL_DIR']
         df = pd.read_csv(StringIO(input_data))
         df, symptoms_enc = format_data(df,model_dir,'test')
         X_test = df[cols_list].values
         X_test = np.hstack((X_test, symptoms_enc)) 
-        
-#         for i,X in enumerate(X_test):
-#             print(df.loc[i])
-#             print(X)
-
+       
         return X_test
         
     else:
@@ -250,10 +242,6 @@ def input_fn(input_data, content_type):
     
     
 def output_fn(prediction, accept):
-    
-#     print(type(prediction))
-#     print(prediction.shape)
-#     print(prediction)
     
     mlb_diseases = joblib.load(os.path.join(model_dir, "diseases_binarizer.joblib"))
     diseases_list = list(mlb_diseases.classes_)
@@ -268,9 +256,7 @@ def output_fn(prediction, accept):
                 diseases.append(disease)
         
         output_list.append(diseases)
-        
-    print(output_list)
-    
+            
     if accept == "application/json":
         
         if len(output_list) == 1:         
