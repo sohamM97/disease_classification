@@ -3,27 +3,32 @@ import numpy as np
 import pandas as pd
 import os
 import json
+import subprocess
+import sys
 from io import StringIO
 
 from sklearn.preprocessing import MultiLabelBinarizer, LabelEncoder
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.multiclass import OneVsRestClassifier
+from sklearn.multioutput import MultiOutputClassifier
 from sklearn.externals import joblib
 
 from sagemaker_containers.beta.framework import worker
 
 model_dir = '/opt/ml/model'
-cols_list = ['gender_categorized','age_binned','district_categorized','blood_pressure',
-                'pulse_rate_categorized','respiration_rate_categorized','BODY_TEMPERATURE',
-                'BODY_WEIGHT','HEIGHT','SPO2_categorized']
+cols_list = ['gender_categorized','age_binned','blood_pressure','pulse_rate_categorized','respiration_rate_categorized','BODY_TEMPERATURE',
+                'BODY_WEIGHT','HEIGHT','SPO2_categorized'] #'district_categorized',
+vitals =['SYSTOLIC_BP','DIASTOLIC_BP','PULSE','RESPIRATION_RATE','BODY_TEMPERATURE','BODY_WEIGHT','HEIGHT','SPO2']
 
 def drop_unnecessary_cols(df):
 
     df.drop(columns=['HEART_RATE','HEAD_CIRCUMFERENCE','UPPER_ARM_CIRCUMFERENCE'],inplace = True)
     df = df[pd.notnull(df['DISEASE_ID'])]
-    df.drop(df[df.REFERRED == 'Y'].index, inplace=True)
+    #df.drop(df[df.REFERRED == 'Y'].index, inplace=True)
     df.drop(df[df.DISEASE_ID == '0'].index, inplace=True)
     df = df[df.SYMPTOM_ID.notnull()]
+    df[vitals] = df[vitals].replace(0, np.nan)
+    df.drop(df[df.DISEASE_ID == 'Confusion'].index, inplace=True)
 
     return df
 
@@ -50,12 +55,14 @@ def bin_ages(df):
     return df
 
 def fill_nas(df):
+    
+    '''WARNING: These values need to be entered as per the median of data'''
 
     df.SYSTOLIC_BP.fillna(120,inplace=True)
     df.DIASTOLIC_BP.fillna(80,inplace=True)
-    df.PULSE.fillna(82,inplace=True)
+    df.PULSE.fillna(84,inplace=True)
     df.RESPIRATION_RATE.fillna(18,inplace=True)
-    df.BODY_TEMPERATURE.fillna(98,inplace=True)
+    df.BODY_TEMPERATURE.fillna(98.2,inplace=True)
     df.BODY_WEIGHT.fillna(45,inplace=True)
     df.HEIGHT.fillna(151,inplace=True)
     df.SPO2.fillna(99,inplace=True)
@@ -125,7 +132,7 @@ def categorize_district(df,model_dir,type='train'):
 
 def encode_symptoms(df,model_dir,type='train'):
 
-    df.SYMPTOM_ID = (df.SYMPTOM_ID.str.split('~'))
+    df.SYMPTOM_ID = [[symptom for symptom in symptoms_row if symptom!=''] for symptoms_row in df.SYMPTOM_ID.str.split('~').tolist()]
     
     symptoms_encoded = []
     
@@ -142,7 +149,7 @@ def encode_symptoms(df,model_dir,type='train'):
         
     df['symptoms_encoded'] = symptoms_encoded.tolist()
     
-    print(mlb_symtoms.classes_)
+#     print(mlb_symtoms.classes_)
 
     return df, symptoms_encoded
 
@@ -171,7 +178,7 @@ def format_data(df,model_dir,type='train'):
     df = categorize_respiration_rate(df)
     df = categorize_spo2(df)
     df = categorize_gender(df)
-    df = categorize_district(df,model_dir,type)
+    #df = categorize_district(df,model_dir,type)
     df, symptoms_encoded = encode_symptoms(df,model_dir,type)
     
     if type == 'train':
@@ -202,7 +209,12 @@ if __name__ == '__main__':
                           'This usually indicates that the channel ({}) was incorrectly specified,\n' +
                           'the data specification in S3 was incorrectly specified or the role specified\n' +
                           'does not have permission to access the data.').format(args.train, "train"))
-    raw_data = [ pd.read_csv(file,encoding = "ISO-8859-1", engine="python") for file in input_files ]
+    try:
+        raw_data = [ pd.read_excel(file) for file in input_files ]
+    except ImportError as e:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", 'xlrd'])
+        raw_data = [ pd.read_excel(file) for file in input_files ]
+        
     train_data = pd.concat(raw_data)
     
     #print(train_data.columns)
@@ -220,8 +232,12 @@ if __name__ == '__main__':
 
     # Now use scikit-learn's classifier to train the model.
     clf = OneVsRestClassifier(RandomForestClassifier(max_depth = max_depth))
+    #clf = RandomForestClassifier(max_depth = max_depth)
+    #clf = MultiOutputClassifier(RandomForestClassifier(max_depth = max_depth))
     clf.fit(X_train, Y_train)
-
+    
+    #print("FIT!!!")
+    
     # Print the coefficients of the trained classifier, and save the coefficients
     joblib.dump(clf, os.path.join(args.model_dir, "model.joblib"))
 
@@ -240,6 +256,13 @@ def input_fn(input_data, content_type):
     else:
         raise ValueError("{} not supported by script!".format(content_type))
     
+
+def predict_fn(input_data, model):
+    
+    #prediction = model.predict(input_data)
+    return model.predict_proba(input_data)
+    #return np.array([prediction, pred_prob]) 
+    
     
 def output_fn(prediction, accept):
     
@@ -249,10 +272,9 @@ def output_fn(prediction, accept):
     
     for encoded_disease in prediction:
         
-        #print(encoded_disease)
         diseases = []
         for i, disease in enumerate(diseases_list):
-            if encoded_disease[i] == 1:
+            if encoded_disease[i] >= 0.3:
                 diseases.append(disease)
         
         output_list.append(diseases)
